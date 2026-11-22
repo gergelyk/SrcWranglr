@@ -10,7 +10,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use super::scene::{stack_column, Align, Block, Measure, Scene, Wire};
+use super::scene::{stack_column, Align, Block, LegendItem, Measure, Scene, Wire};
 use crate::model::{CodeGraph, Edge, EdgeKind, SymbolId, SymbolKind};
 
 /// Horizontal gap between the three columns (room for the wires).
@@ -26,19 +26,27 @@ enum Side {
     Right,
 }
 
-pub fn build_trail(graph: &CodeGraph, active: SymbolId, measure: Measure) -> Scene {
+/// The trail around `active`, without what the legend has switched off
+/// (`hidden`): symbols of those kinds are left out, and so are the ones
+/// that were only related to the active symbol through hidden relations.
+pub fn build_trail(
+    graph: &CodeGraph,
+    active: SymbolId,
+    hidden: &HashSet<LegendItem>,
+    measure: Measure,
+) -> Scene {
     if !graph.symbols.contains_key(&active) {
         return Scene::default();
     }
     let index = Hierarchy::new(graph);
-    let (center, center_ids) = center_block(graph, &index, active);
-    let relations = relations_of(graph, &center_ids, active);
-    let (neighbors, hidden_neighbors) = ranked_neighbors(graph, &relations, &center_ids);
+    let (center, center_ids) = center_block(graph, &index, active, hidden);
+    let relations = relations_of(graph, &center_ids, active, hidden);
+    let (neighbors, hidden_neighbors) = ranked_neighbors(graph, &relations, &center_ids, hidden);
     let shown: HashSet<SymbolId> = center_ids.iter().chain(neighbors.keys()).copied().collect();
 
     let center_size = super::scene::block_size(&center, measure);
     let (mut groups, mut pills) = stack_column(vec![center], 0.0, Align::Center, 0.0, measure);
-    let (left, right) = side_blocks(graph, &index, &neighbors, &center_ids);
+    let (left, right) = side_blocks(graph, &index, &neighbors, &center_ids, hidden);
     let half = center_size.x / 2.0;
     for (blocks, x, align) in [
         (left, -half - COLUMN_GAP, Align::Right),
@@ -104,6 +112,14 @@ fn is_type(graph: &CodeGraph, id: SymbolId) -> bool {
         .is_some_and(|s| matches!(s.kind, SymbolKind::Class | SymbolKind::Struct))
 }
 
+/// Whether the legend hides symbols like `id`.
+fn is_switched_off(graph: &CodeGraph, id: SymbolId, hidden: &HashSet<LegendItem>) -> bool {
+    graph
+        .symbols
+        .get(&id)
+        .is_some_and(|s| LegendItem::hides_symbol(hidden, s.kind))
+}
+
 fn is_container(graph: &CodeGraph, id: SymbolId) -> bool {
     is_type(graph, id)
         || graph
@@ -134,10 +150,18 @@ fn center_block(
     graph: &CodeGraph,
     index: &Hierarchy,
     active: SymbolId,
+    hidden: &HashSet<LegendItem>,
 ) -> (Block, HashSet<SymbolId>) {
     let symbol = &graph.symbols[&active];
     if is_container(graph, active) {
-        let all = index.children.get(&active).cloned().unwrap_or_default();
+        let all: Vec<_> = index
+            .children
+            .get(&active)
+            .into_iter()
+            .flatten()
+            .copied()
+            .filter(|id| !is_switched_off(graph, *id, hidden))
+            .collect();
         let hidden_members = all.len().saturating_sub(MAX_GROUP_MEMBERS);
         let members: Vec<_> = all
             .iter()
@@ -168,12 +192,18 @@ fn center_block(
     let related: HashSet<SymbolId> = graph
         .edges
         .iter()
-        .filter(|e| e.kind != EdgeKind::Contains && (e.from == active || e.to == active))
+        .filter(|e| {
+            e.kind != EdgeKind::Contains
+                && !hidden.contains(&LegendItem::Relation(e.kind))
+                && (e.from == active || e.to == active)
+        })
         .flat_map(|e| [e.from, e.to])
         .collect();
     let members: Vec<_> = index.children[&owner]
         .iter()
-        .filter(|id| **id == active || related.contains(id))
+        .filter(|id| {
+            **id == active || (related.contains(id) && !is_switched_off(graph, **id, hidden))
+        })
         .filter_map(|id| member_entry(graph, *id))
         .collect();
     let ids = std::iter::once(owner)
@@ -196,6 +226,7 @@ fn relations_of<'g>(
     graph: &'g CodeGraph,
     center_ids: &HashSet<SymbolId>,
     active: SymbolId,
+    hidden: &HashSet<LegendItem>,
 ) -> Vec<&'g Edge> {
     let focus: HashSet<SymbolId> = if is_container(graph, active) {
         center_ids.clone()
@@ -206,7 +237,9 @@ fn relations_of<'g>(
         .edges
         .iter()
         .filter(|e| {
-            e.kind != EdgeKind::Contains && (focus.contains(&e.from) || focus.contains(&e.to))
+            e.kind != EdgeKind::Contains
+                && !hidden.contains(&LegendItem::Relation(e.kind))
+                && (focus.contains(&e.from) || focus.contains(&e.to))
         })
         .collect()
 }
@@ -217,6 +250,7 @@ fn ranked_neighbors(
     graph: &CodeGraph,
     relations: &[&Edge],
     center_ids: &HashSet<SymbolId>,
+    hidden: &HashSet<LegendItem>,
 ) -> (HashMap<SymbolId, Side>, usize) {
     let mut candidates: HashMap<SymbolId, (u8, Side)> = HashMap::new();
     for edge in relations {
@@ -225,7 +259,10 @@ fn ranked_neighbors(
         } else {
             (edge.from, Side::Left)
         };
-        if center_ids.contains(&other) || !graph.symbols.contains_key(&other) {
+        if center_ids.contains(&other)
+            || !graph.symbols.contains_key(&other)
+            || is_switched_off(graph, other, hidden)
+        {
             continue;
         }
         let rank = match edge.kind {
@@ -268,6 +305,7 @@ fn side_blocks(
     index: &Hierarchy,
     neighbors: &HashMap<SymbolId, Side>,
     center_ids: &HashSet<SymbolId>,
+    hidden: &HashSet<LegendItem>,
 ) -> (Vec<Block>, Vec<Block>) {
     let mut ordered: Vec<(&SymbolId, &Side)> = neighbors.iter().collect();
     ordered.sort_by(|(a, _), (b, _)| {
@@ -282,7 +320,7 @@ fn side_blocks(
     for (&id, &side) in &ordered {
         let owner = index
             .owning_type(graph, id)
-            .filter(|o| !center_ids.contains(o));
+            .filter(|o| !center_ids.contains(o) && !is_switched_off(graph, *o, hidden));
         match owner {
             Some(owner) => boxes.entry(owner).or_insert((side, Vec::new())).1.push(id),
             None if is_type(graph, id) => {
@@ -348,7 +386,7 @@ mod tests {
     }
 
     fn trail(graph: &CodeGraph, active: &str) -> Scene {
-        build_trail(graph, id(graph, active), &fake_measure)
+        build_trail(graph, id(graph, active), &HashSet::new(), &fake_measure)
     }
 
     fn center_x(scene: &Scene, symbol: SymbolId) -> f32 {
@@ -408,6 +446,24 @@ mod tests {
     }
 
     #[test]
+    fn switched_off_relations_and_kinds_leave_nothing_unconnected_behind() {
+        let graph = demo_codebase().expect("demo");
+        let active = id(&graph, "total_area");
+
+        let no_calls = HashSet::from([LegendItem::Relation(EdgeKind::Calls)]);
+        let scene = build_trail(&graph, active, &no_calls, &fake_measure);
+        assert!(scene.wires.iter().all(|w| w.kind != EdgeKind::Calls));
+        assert!(scene.anchor(id(&graph, "main")).is_none());
+        assert!(scene.anchor(id(&graph, "Circle::area")).is_none());
+        assert!(scene.anchor(active).is_some());
+
+        let no_functions = HashSet::from([LegendItem::Symbols(SymbolKind::Function)]);
+        let scene = build_trail(&graph, active, &no_functions, &fake_measure);
+        assert!(scene.anchor(id(&graph, "main")).is_none());
+        assert!(scene.anchor(active).is_some());
+    }
+
+    #[test]
     fn callee_members_are_grouped_inside_their_class_box() {
         let graph = demo_codebase().expect("demo");
         let scene = trail(&graph, "total_area");
@@ -458,7 +514,7 @@ mod tests {
     fn contains_edges_are_never_wires() {
         let graph = demo_codebase().expect("demo");
         for symbol in graph.symbols.values() {
-            let scene = build_trail(&graph, symbol.id, &fake_measure);
+            let scene = build_trail(&graph, symbol.id, &HashSet::new(), &fake_measure);
             assert!(scene.wires.iter().all(|w| w.kind != EdgeKind::Contains));
             assert_disjoint(&all_rects(&scene));
             // Every wire endpoint is drawn.
@@ -497,7 +553,7 @@ mod tests {
     #[test]
     fn caps_neighbors_and_counts_the_rest() {
         let graph = hub(100);
-        let scene = build_trail(&graph, 0, &fake_measure);
+        let scene = build_trail(&graph, 0, &HashSet::new(), &fake_measure);
         assert_eq!(scene.all_pills().count(), MAX_NEIGHBORS + 1);
         assert_eq!(scene.hidden_neighbors, 100 - MAX_NEIGHBORS);
         assert_disjoint(&all_rects(&scene));
@@ -506,7 +562,7 @@ mod tests {
     #[test]
     fn unknown_active_symbol_gives_empty_scene() {
         let graph = demo_codebase().expect("demo");
-        let scene = build_trail(&graph, 9_999, &fake_measure);
+        let scene = build_trail(&graph, 9_999, &HashSet::new(), &fake_measure);
         assert!(scene.bounds().is_none());
     }
 }

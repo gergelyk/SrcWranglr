@@ -206,7 +206,9 @@ impl SymbolList {
                         mark_prefix(notebook, *id),
                         row_label(symbol, self.query.sort, project)
                     );
-                    let label = egui::RichText::new(label).family(family.clone());
+                    let label = egui::RichText::new(label)
+                        .family(family.clone())
+                        .color(crate::graph::kind_color(symbol.kind));
                     let row = ui.selectable_label(selected == Some(*id), label);
                     if row.clicked() {
                         clicked = Some(*id);

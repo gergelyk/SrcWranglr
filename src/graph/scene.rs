@@ -5,6 +5,8 @@
 //! Builders (`trail`, `overview`) produce a `Scene`; `render` paints it and
 //! the view hit-tests it. Nothing here depends on egui's runtime.
 
+use std::collections::HashSet;
+
 use egui::{Pos2, Rect, Vec2};
 
 use crate::model::{EdgeKind, SymbolId, SymbolKind};
@@ -18,6 +20,29 @@ pub const GROUP_TITLE_HEIGHT: f32 = 28.0;
 /// Space for the "+N more" footer of truncated groups.
 pub const GROUP_FOOTER_HEIGHT: f32 = 18.0;
 pub const BLOCK_GAP: f32 = 18.0;
+
+/// A legend entry: clicking it hides or shows what it stands for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LegendItem {
+    /// Symbols of a kind; methods count as functions, structs as classes.
+    Symbols(SymbolKind),
+    Relation(EdgeKind),
+}
+
+impl LegendItem {
+    /// Whether `hidden` switches off symbols of `kind`.
+    pub fn hides_symbol(hidden: &HashSet<LegendItem>, kind: SymbolKind) -> bool {
+        hidden.contains(&Self::of_symbol(kind))
+    }
+
+    pub fn of_symbol(kind: SymbolKind) -> Self {
+        Self::Symbols(match kind {
+            SymbolKind::Method => SymbolKind::Function,
+            SymbolKind::Struct => SymbolKind::Class,
+            other => other,
+        })
+    }
+}
 
 /// What a piece of text is used for; builders measure text through this so
 /// layout stays testable without real fonts.

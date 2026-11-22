@@ -121,7 +121,7 @@ impl HarnessView {
         };
         let root = self.root.clone();
         let dialog = dialogs::spawn(ctx, move || {
-            let dialog = rfd::FileDialog::new()
+            let dialog = dialogs::file_dialog()
                 .set_title("Save the fuzzing file")
                 .set_file_name(file_name);
             match root {
@@ -144,7 +144,7 @@ impl HarnessView {
     pub(super) fn save_all(&mut self, ctx: &egui::Context) {
         let root = self.root.clone();
         let dialog = dialogs::spawn(ctx, move || {
-            let dialog = rfd::FileDialog::new().set_title("Save the fuzzing files into");
+            let dialog = dialogs::file_dialog().set_title("Save the fuzzing files into");
             match root {
                 Some(root) => dialog.set_directory(root),
                 None => dialog,

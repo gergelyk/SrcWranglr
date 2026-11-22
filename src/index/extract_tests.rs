@@ -59,7 +59,7 @@ fn records_member_uses_and_field_types() {
     let facts = extract(CIRCLE);
     assert!(has_ref(&facts, "Circle::area", "radius", EdgeKind::Uses));
     assert!(has_ref(&facts, "Circle::Circle", "radius", EdgeKind::Uses));
-    assert!(has_ref(&facts, "Circle", "Point", EdgeKind::Uses));
+    assert!(has_ref(&facts, "Circle", "Point", EdgeKind::Composes));
     // Parameters are locals, not references.
     assert!(!facts.refs.iter().any(|r| r.target == "r"));
 }
@@ -248,4 +248,38 @@ fn survives_deeply_nested_expressions() {
     );
     let facts = extract(&deep);
     assert!(decl(&facts, "f").is_definition);
+}
+
+#[test]
+fn fields_are_compositions_or_aggregations_by_how_they_hold_the_type() {
+    let facts = extract("struct A { B b; C *c; D &d; };\n");
+    assert!(has_ref(&facts, "A", "B", EdgeKind::Composes));
+    assert!(has_ref(&facts, "A", "C", EdgeKind::Aggregates));
+    assert!(has_ref(&facts, "A", "D", EdgeKind::Aggregates));
+}
+
+#[test]
+fn forward_declarations_are_recorded_as_declarations() {
+    let facts = extract("class Fwd;\nstruct S { class Inner; };\n");
+    assert!(!decl(&facts, "Fwd").is_definition);
+    assert!(decl(&facts, "Fwd").name_span.is_some());
+    assert!(!decl(&facts, "S::Inner").is_definition);
+}
+
+#[test]
+fn containers_and_smart_pointers_hold_their_template_arguments() {
+    let facts = extract(
+        "struct A {\n\
+         std::vector<B> v;\n\
+         std::vector<C*> p;\n\
+         std::shared_ptr<D> s;\n\
+         std::unique_ptr<E> u;\n\
+         std::map<std::string, std::weak_ptr<F>> m;\n\
+         };\n",
+    );
+    assert!(has_ref(&facts, "A", "B", EdgeKind::Composes));
+    assert!(has_ref(&facts, "A", "C", EdgeKind::Aggregates));
+    assert!(has_ref(&facts, "A", "D", EdgeKind::Aggregates));
+    assert!(has_ref(&facts, "A", "E", EdgeKind::Composes));
+    assert!(has_ref(&facts, "A", "F", EdgeKind::Aggregates));
 }

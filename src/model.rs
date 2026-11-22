@@ -36,6 +36,10 @@ pub enum EdgeKind {
     Calls,
     Inherits,
     Uses,
+    /// A field holding a pointer or reference to the type (UML aggregation).
+    Aggregates,
+    /// A field holding the type by value (UML composition).
+    Composes,
     Contains,
 }
 
@@ -45,6 +49,8 @@ impl EdgeKind {
             EdgeKind::Calls => "call",
             EdgeKind::Inherits => "base class",
             EdgeKind::Uses => "use",
+            EdgeKind::Aggregates => "aggregation",
+            EdgeKind::Composes => "composition",
             EdgeKind::Contains => "member",
         }
     }

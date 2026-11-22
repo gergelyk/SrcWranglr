@@ -368,7 +368,7 @@ fn clicking_plain_code_does_nothing() {
 }
 
 #[test]
-fn clicking_another_occurrence_of_the_selected_symbol_focuses_it() {
+fn clicking_another_occurrence_of_the_selected_symbol_navigates_to_it() {
     let mut harness = harness("helper");
     let line = SOURCE.lines().nth(2).expect("third line");
     let rect = harness.get_by_label(line).rect();
@@ -379,8 +379,10 @@ fn clicking_another_occurrence_of_the_selected_symbol_focuses_it() {
         rect.center().y,
     );
     click_at(&mut harness, pos);
-    assert_eq!(harness.state().clicked, None);
-    harness.get_by_label("4 / 4");
+    assert_eq!(
+        harness.state().clicked,
+        Some(id(&harness.state().graph, "helper"))
+    );
 }
 
 #[test]
@@ -608,15 +610,12 @@ fn clicking_space_or_punctuation_clears_the_highlight() {
     let source = "void f(char *d) {\nstrcpy(d, d);\n}\n";
     let mut harness = harness_for(source, "f");
     let file = "a.cpp".to_string();
-    let selected = harness.state().selected.expect("selected");
     let state = harness.state_mut();
     state
         .panel
-        .event_action(file.clone(), CodeEvent::Word(Some("d".into())), selected);
+        .event_action(file.clone(), CodeEvent::Word(Some("d".into())));
     assert_eq!(state.panel.highlighted_word.as_deref(), Some("d"));
-    state
-        .panel
-        .event_action(file, CodeEvent::Word(None), selected);
+    state.panel.event_action(file, CodeEvent::Word(None));
     assert_eq!(state.panel.highlighted_word, None);
 }
 

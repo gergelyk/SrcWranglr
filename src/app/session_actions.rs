@@ -168,7 +168,7 @@ impl SrcWranglrApp {
         };
         let name = format!("{}.{SESSION_EXTENSION}", self.project.name);
         let dialog = dialogs::spawn(ctx, move || {
-            rfd::FileDialog::new()
+            dialogs::file_dialog()
                 .set_title("Save Session As")
                 .set_file_name(name)
                 .add_filter(FILE_KIND, &[SESSION_EXTENSION])
@@ -185,7 +185,7 @@ impl SrcWranglrApp {
     /// Asks for a session file to open.
     pub(super) fn open_session_dialog(&mut self, ctx: &egui::Context) {
         let dialog = dialogs::spawn(ctx, || {
-            rfd::FileDialog::new()
+            dialogs::file_dialog()
                 .set_title("Open Session")
                 .add_filter(FILE_KIND, &[SESSION_EXTENSION])
                 .pick_file()

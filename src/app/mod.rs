@@ -21,6 +21,7 @@ mod docs;
 mod docs_actions;
 mod docs_view;
 mod editor;
+mod file_explorer;
 mod finding_view;
 pub(crate) mod findings;
 mod findings_actions;
@@ -36,6 +37,7 @@ mod history_panel;
 mod in_app_agent;
 mod journal_actions;
 mod journal_view;
+mod keymap;
 pub mod launch;
 mod layout;
 mod locations;
@@ -98,16 +100,22 @@ use std::path::PathBuf;
 
 use launch::LaunchOptions;
 
-use egui::{Color32, Key, KeyboardShortcut, Modifiers, RichText};
+use egui::{Color32, RichText};
+use keymap::{
+    BOOKMARK_SHORTCUT, EDITOR_SHORTCUT, ENTRY_POINT_SHORTCUT, FINDINGS_SHORTCUT, JOURNAL_SHORTCUT,
+    LAYOUT_SHORTCUT, NOTES_PANEL_SHORTCUT, NOTE_SHORTCUT, OPEN_SHORTCUT, SAVE_SESSION_SHORTCUT,
+    SETTINGS_SHORTCUT, TRIAGE_SHORTCUT,
+};
 
 use crate::analysis;
 use crate::analysis::reach::Reach;
-use crate::graph::{Badge, GraphView, ViewMode};
+use crate::graph::{Badge, GraphView, NodeAction, ViewMode};
 use crate::index::job::IndexJob;
 use crate::index::{IndexError, IndexOptions, IndexOutcome};
 use code_panel::CodePanel;
 use dangerous_lists::DangerousLists;
 use editor::SourcePosition;
+use file_explorer::{FileAction, FileExplorer};
 use finding_view::FindingView;
 use findings::Findings;
 use findings_panel::FindingsPanel;
@@ -122,25 +130,9 @@ use symbol_list::{SymbolList, SymbolListAction};
 use tool_job::ToolJob;
 use welcome::RecentProjects;
 
-const OPEN_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::O);
-const ENTRY_POINT_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::E);
-const EDITOR_SHORTCUT: KeyboardShortcut =
-    KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::E);
-const BOOKMARK_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::D);
-const NOTE_SHORTCUT: KeyboardShortcut =
-    KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::N);
-const NOTES_PANEL_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::B);
-const FINDINGS_SHORTCUT: KeyboardShortcut =
-    KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::R);
-const TRIAGE_SHORTCUT: KeyboardShortcut =
-    KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::T);
-const LAYOUT_SHORTCUT: KeyboardShortcut =
-    KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::L);
-const SETTINGS_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Comma);
-const SAVE_SESSION_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::S);
-const JOURNAL_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::J);
 /// The symbol list's width until you drag it.
 const SYMBOL_LIST_WIDTH: f32 = 260.0;
+const FILE_EXPLORER_WIDTH: f32 = 200.0;
 /// Entry points listed in the Go menu (all of them are reachable with ⌘E).
 const MAX_ENTRY_MENU_ITEMS: usize = 25;
 const APP_NAME: &str = "SrcWranglr";
@@ -158,6 +150,7 @@ pub struct SrcWranglrApp {
     code_panel: CodePanel,
     palette: Palette,
     symbol_list: SymbolList,
+    file_explorer: FileExplorer,
     notebook: Notebook,
     /// The note being edited, if the editor is open.
     note_editor: Option<NoteEditor>,
@@ -337,6 +330,7 @@ impl SrcWranglrApp {
             code_panel: CodePanel::default(),
             palette: Palette::default(),
             symbol_list: SymbolList::default(),
+            file_explorer: FileExplorer::default(),
             job: None,
             status,
             warnings: Vec::new(),
@@ -356,6 +350,46 @@ impl SrcWranglrApp {
     }
 
     /// Opens what the code panel shows in the user's editor.
+    /// Goes to `id`'s details even if it is already selected: its
+    /// definition is shown and the graph is laid out afresh around it.
+    pub(super) fn navigate_to(&mut self, id: crate::model::SymbolId) {
+        self.graph_view.select(id);
+        self.graph_view.relayout();
+        self.code_panel.restart();
+    }
+
+    fn run_node_action(&mut self, action: NodeAction, ctx: &egui::Context) {
+        let target = |app: &Self, id| {
+            app.project
+                .graph
+                .symbols
+                .get(&id)
+                .map(|s| crate::notes::NoteTarget::Symbol(s.qualified_name.clone()))
+        };
+        match action {
+            NodeAction::Explore(id) => self.navigate_to(id),
+            NodeAction::ShowDocs(id) => self.show_symbol_docs(id),
+            NodeAction::FindLike(id) => self.find_code_like(id, ctx),
+            NodeAction::CrossReferences(id) => {
+                self.show_cross_references(&crate::code_view::Referenced::Symbol(id));
+            }
+            NodeAction::ToggleBookmark(id) => {
+                if let Some(target) = target(self, id) {
+                    self.toggle_bookmark(target);
+                }
+            }
+            NodeAction::EditNote(id) => {
+                if let Some(target) = target(self, id) {
+                    self.edit_note(target);
+                }
+            }
+            NodeAction::OpenInEditor(id) => {
+                self.graph_view.select(id);
+                self.open_in_editor();
+            }
+        }
+    }
+
     fn open_in_editor(&mut self) {
         let Some(root) = self.project.root.as_ref() else {
             self.status = Status::Info(
@@ -421,7 +455,8 @@ impl eframe::App for SrcWranglrApp {
         self.sessions.save(storage);
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        dialogs::remember_window(frame);
         let ctx = ui.ctx().clone();
         self.poll_open_dialog(&ctx);
         self.poll_session_dialog(&ctx);
@@ -511,6 +546,7 @@ impl eframe::App for SrcWranglrApp {
 impl SrcWranglrApp {
     /// The symbol list, notes, findings, source and graph of the open project.
     fn show_project_panes(&mut self, ui: &mut egui::Ui) {
+        self.show_file_explorer(ui);
         self.show_symbol_list(ui);
         self.show_notes_panel(ui);
         self.show_todo_panel(ui);
@@ -544,6 +580,9 @@ impl SrcWranglrApp {
             };
             self.graph_view.show(ui, &self.project.graph, &badge_of);
         });
+        if let Some(action) = self.graph_view.take_action() {
+            self.run_node_action(action, ui.ctx());
+        }
     }
 
     /// The start page, until a project (or the demo) is open.
@@ -690,6 +729,27 @@ impl SrcWranglrApp {
     }
 
     /// The symbol list, sliding in and out at the left.
+    fn show_file_explorer(&mut self, ui: &mut egui::Ui) {
+        let mut is_shown = self.layout.is_files_shown;
+        let current = self
+            .code_panel
+            .position(&self.project.graph, self.graph_view.selected())
+            .map(|p| p.file);
+        let shown = egui::Panel::left(self.layout.pane_id("file_explorer"))
+            .resizable(true)
+            .default_size(FILE_EXPLORER_WIDTH)
+            .show_collapsible(ui, &mut is_shown, |ui| {
+                self.file_explorer
+                    .show(ui, &self.project.graph, current.as_deref())
+            });
+        let action = shown.and_then(|shown| shown.inner);
+        let is_hidden = !is_shown || action == Some(FileAction::Hide);
+        self.layout = self.layout.with_files_shown(!is_hidden);
+        if let Some(FileAction::Open(file)) = action {
+            self.go_to_place(None, &file, 1);
+        }
+    }
+
     fn show_symbol_list(&mut self, ui: &mut egui::Ui) {
         let mut is_shown = self.layout.is_symbols_shown;
         let shown = egui::Panel::left(self.layout.pane_id("symbol_list"))
@@ -705,7 +765,7 @@ impl SrcWranglrApp {
         let is_hidden = !is_shown || action == Some(SymbolListAction::Hide);
         self.layout = self.layout.with_symbols_shown(!is_hidden);
         match action {
-            Some(SymbolListAction::Select(id)) => self.graph_view.select(id),
+            Some(SymbolListAction::Select(id)) => self.navigate_to(id),
             Some(SymbolListAction::ShowDocs(id)) => self.show_symbol_docs(id),
             Some(SymbolListAction::FindLike(id)) => self.find_code_like(id, ui.ctx()),
             Some(SymbolListAction::Hide) | None => {}

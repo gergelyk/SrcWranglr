@@ -2,6 +2,7 @@
 
 use egui::RichText;
 
+use super::keymap::BACK_SHORTCUT;
 use super::layout::SourcePlacement;
 use super::palette::{self, Command, OPEN_COMMAND_SHORTCUT, OPEN_SYMBOL_SHORTCUT};
 use super::pane_bar::Pane;
@@ -209,10 +210,14 @@ impl SrcWranglrApp {
             Command::TrailView,
             Command::CallHierarchy,
             Command::Overview,
-            Command::Back,
         ]
         .into_iter()
         .find(|command| ui.button(command.label()).clicked())
+        .or_else(|| {
+            let back = egui::Button::new(Command::Back.label())
+                .shortcut_text(ui.ctx().format_shortcut(&BACK_SHORTCUT));
+            ui.add(back).clicked().then_some(Command::Back)
+        })
     }
 
     /// The View menu: where the source pane sits, and resetting pane sizes.

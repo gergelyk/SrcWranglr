@@ -44,6 +44,7 @@ pub struct Layout {
     /// Part of the other panes' ids: Reset Layout bumps it, so they forget
     /// the sizes they were dragged to and start at their defaults again.
     pub generation: u32,
+    pub is_files_shown: bool,
     pub is_symbols_shown: bool,
     pub is_source_shown: bool,
     /// Which defaults the layout was saved under: 0 for one saved before
@@ -59,6 +60,7 @@ impl Default for Layout {
             below_share: DEFAULT_SHARE,
             beside_share: DEFAULT_SHARE,
             generation: 0,
+            is_files_shown: true,
             is_symbols_shown: true,
             is_source_shown: true,
             version: BESIDE_BY_DEFAULT_VERSION,
@@ -105,6 +107,13 @@ impl Layout {
             SourcePlacement::Beside => SourcePlacement::Below,
         };
         Self { source, ..self }
+    }
+
+    pub fn with_files_shown(self, is_files_shown: bool) -> Self {
+        Self {
+            is_files_shown,
+            ..self
+        }
     }
 
     pub fn with_symbols_shown(self, is_symbols_shown: bool) -> Self {

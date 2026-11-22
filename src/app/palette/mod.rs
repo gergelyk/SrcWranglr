@@ -13,10 +13,7 @@ pub(crate) use search::{search, Candidates};
 pub use search::{Command, Entry};
 pub use search::{COMMAND_PREFIX, LIBRARY_PREFIX, NOTE_PREFIX};
 
-pub const OPEN_SYMBOL_SHORTCUT: KeyboardShortcut =
-    KeyboardShortcut::new(Modifiers::COMMAND, Key::P);
-pub const OPEN_COMMAND_SHORTCUT: KeyboardShortcut =
-    KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::P);
+pub use super::keymap::{OPEN_COMMAND_SHORTCUT, OPEN_SYMBOL_SHORTCUT};
 /// On macOS, also honour a literal Ctrl+P, unless a text field has focus
 /// (where Ctrl+P moves the cursor up).
 const OPEN_SYMBOL_CTRL: KeyboardShortcut = KeyboardShortcut::new(Modifiers::CTRL, Key::P);
@@ -152,7 +149,8 @@ impl Palette {
         let mut picked = None;
         for (index, entry) in self.results.iter().enumerate() {
             let is_highlighted = index == self.highlighted;
-            let row = ui.selectable_label(is_highlighted, row_text(*entry, project, notes));
+            let row =
+                ui.selectable_label(is_highlighted, row_text(*entry, project, notes, ui.style()));
             if is_highlighted && self.should_reveal {
                 row.scroll_to_me(None);
             }
@@ -179,28 +177,49 @@ impl Palette {
     }
 }
 
-fn row_text(entry: Entry, project: &Project, notes: &[(usize, String)]) -> RichText {
-    match entry {
+fn row_text(
+    entry: Entry,
+    project: &Project,
+    notes: &[(usize, String)],
+    style: &egui::Style,
+) -> egui::WidgetText {
+    let text = match entry {
         Entry::Command(command) => RichText::new(command.label()),
         Entry::Note(index) => match notes.iter().find(|(i, _)| *i == index) {
             Some((_, label)) => RichText::new(label),
             None => RichText::new("(missing note)"),
         },
         Entry::Symbol(id) => match project.graph.symbols.get(&id) {
-            Some(s) => RichText::new(format!(
-                "{}    {} · {}",
-                s.qualified_name,
-                s.kind.label(),
-                s.file
-            ))
-            .monospace(),
+            Some(s) => {
+                let name = RichText::new(&s.qualified_name)
+                    .monospace()
+                    .color(crate::graph::kind_color(s.kind));
+                let place = RichText::new(format!("    {} · {}", s.kind.label(), s.file))
+                    .monospace()
+                    .weak();
+                let mut job = egui::text::LayoutJob::default();
+                name.append_to(
+                    &mut job,
+                    style,
+                    egui::FontSelection::Default,
+                    egui::Align::LEFT,
+                );
+                place.append_to(
+                    &mut job,
+                    style,
+                    egui::FontSelection::Default,
+                    egui::Align::LEFT,
+                );
+                return job.into();
+            }
             None => RichText::new("(missing symbol)"),
         },
         Entry::LibraryFunction(index) => match project.library_functions().get(index) {
             Some(function) => RichText::new(library_row(function)).monospace(),
             None => RichText::new("(missing function)"),
         },
-    }
+    };
+    text.into()
 }
 
 /// `system()    library · 2 calls`.
@@ -294,12 +313,12 @@ mod tests {
     #[test]
     fn shortcuts_toggle_and_switch_to_commands_keeping_the_query() {
         let mut harness = harness("circle");
-        let command_shortcut = OPEN_COMMAND_SHORTCUT;
+        let command_shortcut = *OPEN_COMMAND_SHORTCUT;
         harness.key_press_modifiers(command_shortcut.modifiers, command_shortcut.logical_key);
         harness.run();
         assert_eq!(harness.state().palette.query, ">circle");
 
-        let symbol_shortcut = OPEN_SYMBOL_SHORTCUT;
+        let symbol_shortcut = *OPEN_SYMBOL_SHORTCUT;
         harness.key_press_modifiers(symbol_shortcut.modifiers, symbol_shortcut.logical_key);
         harness.run();
         assert!(!harness.state().palette.is_open);

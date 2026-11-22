@@ -41,7 +41,7 @@ impl SrcWranglrApp {
     pub(super) fn run_panel_action(&mut self, action: PanelAction, ctx: &egui::Context) {
         match action {
             PanelAction::Hide => self.layout = self.layout.with_source_shown(false),
-            PanelAction::Explore(id) => self.graph_view.select(id),
+            PanelAction::Explore(id) => self.navigate_to(id),
             PanelAction::OpenInEditor => self.open_in_editor(),
             PanelAction::ToggleBookmark(target) => self.toggle_bookmark(target),
             PanelAction::EditNote(target) => self.edit_note(target),

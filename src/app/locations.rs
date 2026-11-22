@@ -1,7 +1,7 @@
 //! The list of places a symbol appears, and which one the code panel is
 //! showing ("location 3 of 12").
 
-use crate::model::{CodeGraph, Location, OccurrenceRole, Span, SymbolId};
+use crate::model::{CodeGraph, Location, OccurrenceRole, SymbolId};
 
 #[derive(Debug, Clone)]
 pub struct LocationCursor {
@@ -49,18 +49,6 @@ impl LocationCursor {
         self.locations.len()
     }
 
-    /// The cursor moved to the location at `span` in `file`, if there is one.
-    pub fn focused_on(self, file: &str, span: Span) -> Self {
-        let found = self
-            .locations
-            .iter()
-            .position(|l| l.file == file && l.occurrence.span == span);
-        match found {
-            Some(index) => Self { index, ..self },
-            None => self,
-        }
-    }
-
     /// The cursor moved `delta` locations, wrapping around at either end.
     pub fn stepped(self, delta: isize) -> Self {
         let Ok(len) = isize::try_from(self.locations.len()) else {
@@ -80,6 +68,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
+    use crate::model::Span;
     use crate::model::{EdgeKind, Occurrence, Symbol, SymbolKind};
 
     fn occurrence(line: u32, role: OccurrenceRole) -> Occurrence {
@@ -152,20 +141,6 @@ mod tests {
         g.occurrences
             .insert("b.cc".into(), vec![occurrence(1, USE), occurrence(9, USE)]);
         assert_eq!(current(&LocationCursor::new(&g, 1)), ("b.cc".into(), 1));
-    }
-
-    #[test]
-    fn focuses_on_a_given_location_or_stays_put() {
-        let cursor = LocationCursor::new(&graph(), 1);
-        let span = |line| Span {
-            line,
-            start: 0,
-            end: 3,
-        };
-        let moved = cursor.focused_on("b.cc", span(1));
-        assert_eq!(current(&moved), ("b.cc".into(), 1));
-        let unknown = moved.focused_on("a.h", span(40));
-        assert_eq!(current(&unknown), ("b.cc".into(), 1));
     }
 
     #[test]

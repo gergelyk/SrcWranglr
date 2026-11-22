@@ -2,12 +2,15 @@
 //! boxes, colored symbol pills, and smooth wires between pill edges.
 //! Pure drawing — no input handling or state changes.
 
+use std::collections::HashSet;
+
 use egui::epaint::{CubicBezierShape, PathShape};
 use egui::{Align2, Color32, FontId, Painter, Pos2, Rect, Stroke, StrokeKind, Vec2};
 
 use super::camera::Camera;
 use super::scene::{
-    Group, Pill, Scene, TextRole, Wire, GROUP_FOOTER_HEIGHT, GROUP_PADDING, PILL_PADDING_X,
+    Group, LegendItem, Pill, Scene, TextRole, Wire, GROUP_FOOTER_HEIGHT, GROUP_PADDING,
+    PILL_PADDING_X,
 };
 use crate::model::{EdgeKind, SymbolId, SymbolKind};
 use crate::style::{BOOKMARK_COLOR, MARK_OUTLINE, NOTE_COLOR};
@@ -136,6 +139,12 @@ pub fn pill_colors(kind: SymbolKind) -> (Color32, Color32) {
     }
 }
 
+/// The color a symbol's kind is drawn in as text (the list's rows): the
+/// pill's fill.
+pub fn kind_color(kind: SymbolKind) -> Color32 {
+    pill_colors(kind).0
+}
+
 /// Wire color by relationship; slightly deeper on light backgrounds.
 pub fn wire_color(kind: EdgeKind, palette: &Palette) -> Color32 {
     match (kind, palette.is_dark) {
@@ -145,6 +154,10 @@ pub fn wire_color(kind: EdgeKind, palette: &Palette) -> Color32 {
         (EdgeKind::Uses, false) => Color32::from_rgb(0x3A, 0x8C, 0xD0),
         (EdgeKind::Inherits, true) => Color32::from_rgb(0xA0, 0xA6, 0xAE),
         (EdgeKind::Inherits, false) => Color32::from_rgb(0x80, 0x86, 0x90),
+        (EdgeKind::Aggregates, true) => Color32::from_rgb(0x6C, 0xCB, 0xA6),
+        (EdgeKind::Aggregates, false) => Color32::from_rgb(0x2E, 0x9E, 0x78),
+        (EdgeKind::Composes, true) => Color32::from_rgb(0xE0, 0x7A, 0x9C),
+        (EdgeKind::Composes, false) => Color32::from_rgb(0xC2, 0x3F, 0x6A),
         (EdgeKind::Contains, _) => palette.muted,
     }
 }
@@ -180,6 +193,9 @@ pub struct Frame<'a> {
     pub palette: Palette,
     /// Which symbols have notes or bookmarks.
     pub badge_of: &'a dyn Fn(SymbolId) -> Option<Badge>,
+    /// Legend entries switched off (their things are already left out of
+    /// the scene; the legend shows them struck through).
+    pub hidden: &'a HashSet<LegendItem>,
 }
 
 impl Frame<'_> {
@@ -196,7 +212,18 @@ impl Frame<'_> {
     }
 }
 
-pub fn paint(painter: &Painter, frame: &Frame) {
+/// Where the legend was drawn.
+#[derive(Debug, Clone, Default)]
+pub struct Legend {
+    /// Each entry's area, in screen coordinates, so clicks can be told.
+    pub items: Vec<(LegendItem, Rect)>,
+    /// The height of the whole legend (it wraps onto more rows when the
+    /// canvas is narrow).
+    pub height: f32,
+}
+
+/// Paints the scene and the legend.
+pub fn paint(painter: &Painter, frame: &Frame) -> Legend {
     painter.rect_filled(painter.clip_rect(), 0.0, frame.palette.background);
     for group in &frame.scene.groups {
         paint_group(painter, frame, group);
@@ -205,7 +232,7 @@ pub fn paint(painter: &Painter, frame: &Frame) {
     for pill in frame.scene.all_pills() {
         paint_pill(painter, frame, pill);
     }
-    paint_legend(painter, painter.clip_rect(), &frame.palette);
+    paint_legend(painter, painter.clip_rect(), &frame.palette, frame.hidden)
 }
 
 fn paint_group(painter: &Painter, frame: &Frame, group: &Group) {
@@ -307,6 +334,10 @@ fn paint_wires(painter: &Painter, frame: &Frame) {
         );
         painter.add(curve);
         paint_arrowhead(painter, points[2], points[3], color);
+        if matches!(wire.kind, EdgeKind::Aggregates | EdgeKind::Composes) {
+            let is_filled = wire.kind == EdgeKind::Composes;
+            paint_diamond(painter, points[1], points[0], color, is_filled);
+        }
     }
 }
 
@@ -323,68 +354,178 @@ fn paint_arrowhead(painter: &Painter, control: Pos2, tip: Pos2, color: Color32) 
     painter.add(PathShape::convex_polygon(triangle, color, Stroke::NONE));
 }
 
+/// A diamond whose tip is at `tip`, pointing away from `control`: hollow
+/// for aggregation, filled for composition.
+fn paint_diamond(painter: &Painter, control: Pos2, tip: Pos2, color: Color32, is_filled: bool) {
+    let delta = tip - control;
+    if delta.length() < f32::EPSILON {
+        return;
+    }
+    let dir = delta.normalized();
+    let normal = Vec2::new(-dir.y, dir.x) * ARROW_HALF_WIDTH;
+    let middle = tip - dir * ARROW_LENGTH;
+    let points = vec![
+        tip,
+        middle + normal,
+        tip - dir * ARROW_LENGTH * 2.0,
+        middle - normal,
+    ];
+    let (fill, stroke) = if is_filled {
+        (color, Stroke::NONE)
+    } else {
+        (Color32::TRANSPARENT, Stroke::new(1.4, color))
+    };
+    painter.add(PathShape::convex_polygon(points, fill, stroke));
+}
+
 enum Swatch {
     Pill(Color32),
     Wire(Color32),
 }
 
-/// One-row legend strip along the bottom edge of the canvas.
-fn paint_legend(painter: &Painter, canvas: Rect, palette: &Palette) {
+/// One-row legend strip along the bottom edge of the canvas. Entries
+/// switched off are dimmed and struck through.
+fn paint_legend(
+    painter: &Painter,
+    canvas: Rect,
+    palette: &Palette,
+    hidden: &HashSet<LegendItem>,
+) -> Legend {
+    let symbols = |kind| LegendItem::Symbols(kind);
+    let relation = |kind| LegendItem::Relation(kind);
     let items = [
         (
+            symbols(SymbolKind::Function),
             Swatch::Pill(pill_colors(SymbolKind::Function).0),
             "function / method",
         ),
-        (Swatch::Pill(pill_colors(SymbolKind::Field).0), "field"),
         (
+            symbols(SymbolKind::Field),
+            Swatch::Pill(pill_colors(SymbolKind::Field).0),
+            "field",
+        ),
+        (
+            symbols(SymbolKind::Class),
             Swatch::Pill(pill_colors(SymbolKind::Class).0),
             "class / struct",
         ),
         (
+            symbols(SymbolKind::Namespace),
             Swatch::Pill(pill_colors(SymbolKind::Namespace).0),
             "namespace",
         ),
-        (Swatch::Wire(wire_color(EdgeKind::Calls, palette)), "calls"),
-        (Swatch::Wire(wire_color(EdgeKind::Uses, palette)), "uses"),
         (
+            relation(EdgeKind::Calls),
+            Swatch::Wire(wire_color(EdgeKind::Calls, palette)),
+            "calls",
+        ),
+        (
+            relation(EdgeKind::Uses),
+            Swatch::Wire(wire_color(EdgeKind::Uses, palette)),
+            "uses",
+        ),
+        (
+            relation(EdgeKind::Inherits),
             Swatch::Wire(wire_color(EdgeKind::Inherits, palette)),
             "inherits",
         ),
+        (
+            relation(EdgeKind::Aggregates),
+            Swatch::Wire(wire_color(EdgeKind::Aggregates, palette)),
+            "aggregates",
+        ),
+        (
+            relation(EdgeKind::Composes),
+            Swatch::Wire(wire_color(EdgeKind::Composes, palette)),
+            "composes",
+        ),
     ];
+    let font = FontId::proportional(LEGEND_FONT_SIZE);
+    let entries: Vec<_> = items
+        .into_iter()
+        .map(|(item, swatch, text)| {
+            let is_hidden = hidden.contains(&item);
+            let color = if is_hidden {
+                palette.title.gamma_multiply(0.35)
+            } else {
+                palette.title
+            };
+            let galley = painter.layout_no_wrap(text.to_owned(), font.clone(), color);
+            (item, swatch, galley, is_hidden)
+        })
+        .collect();
+
+    // Entries that don't fit the width go on a new row.
+    let left = canvas.left() + LEGEND_PADDING;
+    let right = canvas.right() - LEGEND_PADDING;
+    let mut row = 0usize;
+    let mut x = left;
+    let mut placed = Vec::new();
+    let mut was_relation = false;
+    for (_, swatch, galley, _) in &entries {
+        let width = LEGEND_SWATCH + LEGEND_SWATCH_GAP + galley.size().x;
+        // Symbol kinds and relations each start on a row of their own.
+        let is_relation = matches!(swatch, Swatch::Wire(_));
+        let is_new_kind = x > left && is_relation != was_relation;
+        was_relation = is_relation;
+        if is_new_kind || (x > left && x + width > right) {
+            row += 1;
+            x = left;
+        }
+        placed.push((row, x));
+        x += width + LEGEND_ITEM_GAP;
+    }
+    let height = LEGEND_STRIP_HEIGHT * (row + 1) as f32;
     let strip = Rect::from_min_max(
-        Pos2::new(canvas.left(), canvas.bottom() - LEGEND_STRIP_HEIGHT),
+        Pos2::new(canvas.left(), canvas.bottom() - height),
         canvas.max,
     );
     painter.rect_filled(strip, 0.0, palette.legend_fill);
     let top_border = Stroke::new(1.0, palette.group_border);
     painter.line_segment([strip.left_top(), strip.right_top()], top_border);
 
-    let font = FontId::proportional(LEGEND_FONT_SIZE);
-    let y = strip.center().y;
-    let mut x = strip.left() + LEGEND_PADDING;
-    for (swatch, text) in items {
+    let mut rects = Vec::new();
+    for ((item, swatch, galley, is_hidden), (row, start)) in entries.into_iter().zip(placed) {
+        let top = strip.top() + LEGEND_STRIP_HEIGHT * row as f32;
+        let y = top + LEGEND_STRIP_HEIGHT / 2.0;
+        let dim = |color: Color32| {
+            if is_hidden {
+                color.gamma_multiply(0.35)
+            } else {
+                color
+            }
+        };
         let swatch_rect = Rect::from_min_size(
-            Pos2::new(x, y - LEGEND_STRIP_HEIGHT * 0.25),
+            Pos2::new(start, y - LEGEND_STRIP_HEIGHT * 0.25),
             Vec2::new(LEGEND_SWATCH, LEGEND_STRIP_HEIGHT * 0.5),
         );
         match swatch {
             Swatch::Pill(color) => {
-                painter.rect_filled(swatch_rect, 4.0, color);
+                painter.rect_filled(swatch_rect, 4.0, dim(color));
             }
             Swatch::Wire(color) => {
                 let ends = [swatch_rect.left_center(), swatch_rect.right_center()];
-                painter.line_segment(ends, Stroke::new(2.0, color));
+                painter.line_segment(ends, Stroke::new(2.0, dim(color)));
             }
         }
-        x += LEGEND_SWATCH + LEGEND_SWATCH_GAP;
-        let galley = painter.layout_no_wrap(text.to_owned(), font.clone(), palette.title);
-        let width = galley.size().x;
-        painter.galley(
-            Pos2::new(x, y - galley.size().y / 2.0),
-            galley,
-            palette.title,
+        let text_x = start + LEGEND_SWATCH + LEGEND_SWATCH_GAP;
+        let size = galley.size();
+        let text_rect = Rect::from_min_size(Pos2::new(text_x, y - size.y / 2.0), size);
+        let text_color = dim(palette.title);
+        painter.galley(text_rect.min, galley, text_color);
+        if is_hidden {
+            let line = [text_rect.left_center(), text_rect.right_center()];
+            painter.line_segment(line, Stroke::new(1.0, text_color));
+        }
+        let item_rect = Rect::from_x_y_ranges(
+            (start - LEGEND_ITEM_GAP / 2.0)..=(text_rect.right() + LEGEND_ITEM_GAP / 2.0),
+            top..=(top + LEGEND_STRIP_HEIGHT),
         );
-        x += width + LEGEND_ITEM_GAP;
+        rects.push((item, item_rect));
+    }
+    Legend {
+        items: rects,
+        height,
     }
 }
 
@@ -457,6 +598,7 @@ mod tests {
                 hovered: None,
                 palette: Palette::for_visuals(ui.visuals()),
                 badge_of,
+                hidden: &HashSet::new(),
             };
             paint(ui.painter(), &frame);
         });

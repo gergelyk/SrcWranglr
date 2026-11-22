@@ -172,6 +172,88 @@ impl Extractor {
     }
 }
 
+/// Whether a declarator makes a pointer or reference (possibly to an array
+/// of them) rather than a value of the declared type.
+fn holds_indirectly(declarator: Node) -> bool {
+    let mut node = declarator;
+    loop {
+        if matches!(
+            node.kind(),
+            "pointer_declarator"
+                | "reference_declarator"
+                | "abstract_pointer_declarator"
+                | "abstract_reference_declarator"
+        ) {
+            return true;
+        }
+        match node.child_by_field_name("declarator") {
+            Some(inner) => node = inner,
+            None => return false,
+        }
+    }
+}
+
+/// Class templates that refer to what they hold without owning it.
+fn is_non_owning_template(name: &str) -> bool {
+    let last = name.rsplit("::").next().unwrap_or(name);
+    matches!(
+        last,
+        "shared_ptr" | "weak_ptr" | "reference_wrapper" | "observer_ptr" | "intrusive_ptr"
+    )
+}
+
+/// The types a field's type holds, with whether each is only referred to.
+/// Looks inside templates, so `std::vector<Foo>` holds a `Foo`, and
+/// `std::shared_ptr<Foo>` or `std::vector<Foo*>` refer to one.
+fn held_types<'t>(
+    ty: Node<'t>,
+    src: &str,
+    is_indirect: bool,
+    out: &mut Vec<(String, Node<'t>, bool)>,
+) {
+    // `std::vector<B>` is a qualified name whose last part is the template.
+    let mut template = ty;
+    while template.kind() == "qualified_identifier" {
+        match template.child_by_field_name("name") {
+            Some(inner) => template = inner,
+            None => break,
+        }
+    }
+    let name = if template.kind() == "template_type" && template.id() != ty.id() {
+        let end = template
+            .child_by_field_name("name")
+            .map_or(template.start_byte(), |n| n.end_byte());
+        Some(clean_name(&src[ty.start_byte()..end])).filter(|n| !n.is_empty())
+    } else {
+        type_name(ty, src)
+    };
+    let Some(name) = name else {
+        return;
+    };
+    out.push((name.clone(), ty, is_indirect));
+    let ty = template;
+    if ty.kind() != "template_type" {
+        return;
+    }
+    let is_indirect = is_indirect || is_non_owning_template(&name);
+    let Some(args) = ty.child_by_field_name("arguments") else {
+        return;
+    };
+    let mut cursor = args.walk();
+    for arg in args.named_children(&mut cursor) {
+        if arg.kind() != "type_descriptor" {
+            continue;
+        }
+        let Some(inner) = arg.child_by_field_name("type") else {
+            continue;
+        };
+        let by_pointer = arg
+            .child_by_field_name("declarator")
+            .is_some_and(holds_indirectly);
+        held_types(inner, src, is_indirect || by_pointer, out);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Declaration walk (namespaces, classes, functions, fields)
 // ---------------------------------------------------------------------------
@@ -245,7 +327,10 @@ impl Walker<'_> {
         }
         match node.kind() {
             "namespace_definition" => self.visit_namespace(node, scope, depth),
-            kind if is_class_like(kind) => self.visit_class(node, scope, None, depth),
+            kind if is_class_like(kind) => {
+                self.visit_forward_declaration(node, scope);
+                self.visit_class(node, scope, None, depth);
+            }
             "function_definition" => self.visit_function(node, scope, in_class),
             "field_declaration" | "declaration" => {
                 self.visit_declaration(node, scope, in_class, depth)
@@ -334,6 +419,32 @@ impl Walker<'_> {
         self.visit_children(body, &inner, true, depth);
     }
 
+    /// `class Foo;`: a declaration of the type, so the name is clickable.
+    /// Does nothing for a class with a body, or an unnamed one.
+    fn visit_forward_declaration(&mut self, node: Node, scope: &[String]) {
+        if node.child_by_field_name("body").is_some() {
+            return;
+        }
+        let Some((name, name_node)) = node
+            .child_by_field_name("name")
+            .and_then(|n| Some((type_name(n, self.src)?, n)))
+        else {
+            return;
+        };
+        let kind = if node.kind() == "class_specifier" {
+            SymbolKind::Class
+        } else {
+            SymbolKind::Struct
+        };
+        self.facts.decls.push(Decl {
+            qualified_name: join(scope, &name),
+            kind,
+            line: line_of(node),
+            is_definition: false,
+            name_span: name_span(name_node),
+        });
+    }
+
     fn visit_typedef(&mut self, node: Node, scope: &[String], depth: usize) {
         let Some(ty) = node
             .child_by_field_name("type")
@@ -356,6 +467,9 @@ impl Walker<'_> {
     fn visit_declaration(&mut self, node: Node, scope: &[String], in_class: bool, depth: usize) {
         let ty = node.child_by_field_name("type");
         if let Some(ty) = ty.filter(|t| is_class_like(t.kind())) {
+            if field_children(node, "declarator").is_empty() {
+                self.visit_forward_declaration(ty, scope);
+            }
             self.visit_class(ty, scope, None, depth);
         }
         let owner = join(scope, "");
@@ -391,9 +505,17 @@ impl Walker<'_> {
                     is_definition: true,
                     name_span: name_span(name_node),
                 });
-                let type_ref = ty.and_then(|t| Some((type_name(t, self.src)?, t)));
-                if let Some((type_ref, at)) = type_ref {
-                    self.add_ref(owner, type_ref, EdgeKind::Uses, Lookup::ScopedOrUnique, at);
+                let mut held = Vec::new();
+                if let Some(ty) = ty {
+                    held_types(ty, self.src, holds_indirectly(declarator), &mut held);
+                }
+                for (type_ref, at, is_indirect) in held {
+                    let kind = if is_indirect {
+                        EdgeKind::Aggregates
+                    } else {
+                        EdgeKind::Composes
+                    };
+                    self.add_ref(owner, type_ref, kind, Lookup::ScopedOrUnique, at);
                 }
             }
         }

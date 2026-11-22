@@ -63,7 +63,7 @@ impl SrcWranglrApp {
         };
         let name = format!("{}-audit.{BUNDLE_EXTENSION}", self.project.name);
         let dialog = dialogs::spawn(ctx, move || {
-            rfd::FileDialog::new()
+            dialogs::file_dialog()
                 .set_title("Export Audit Bundle")
                 .set_file_name(name)
                 .add_filter(FILE_KIND, &[BUNDLE_EXTENSION])
@@ -97,7 +97,7 @@ impl SrcWranglrApp {
             return;
         }
         let dialog = dialogs::spawn(ctx, || {
-            rfd::FileDialog::new()
+            dialogs::file_dialog()
                 .set_title("Import Audit Bundle")
                 .add_filter(FILE_KIND, &[BUNDLE_EXTENSION])
                 .pick_file()

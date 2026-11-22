@@ -1,5 +1,6 @@
 //! The keyboard shortcuts that work anywhere in the window.
 
+use super::keymap::BACK_SHORTCUT;
 use super::palette::Command;
 use super::pane_bar::Pane;
 use super::survey_view::SurveyTab;
@@ -41,6 +42,9 @@ impl SrcWranglrApp {
         }
         if can_use && ctx.input_mut(|i| i.consume_shortcut(&SETTINGS_SHORTCUT)) {
             self.open_settings();
+        }
+        if can_use && ctx.input_mut(|i| i.consume_shortcut(&BACK_SHORTCUT)) {
+            self.run_command(Command::Back, ctx);
         }
         if panel {
             self.run_command(Command::TogglePane(Pane::Notes), ctx);

@@ -36,7 +36,7 @@ impl SrcWranglrApp {
         }
         let start = self.project.root.clone();
         let dialog = dialogs::spawn(ctx, move || {
-            let dialog = rfd::FileDialog::new().set_title("Open a C/C++ project folder");
+            let dialog = dialogs::file_dialog().set_title("Open a C/C++ project folder");
             match start {
                 Some(root) => dialog.set_directory(root),
                 None => dialog,

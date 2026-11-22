@@ -30,7 +30,7 @@ impl SrcWranglrApp {
             return;
         }
         let dialog = dialogs::spawn(ctx, || {
-            rfd::FileDialog::new()
+            dialogs::file_dialog()
                 .set_title("Import SARIF Results")
                 .add_filter("SARIF report", &["sarif", "json"])
                 .pick_file()

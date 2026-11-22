@@ -8,6 +8,60 @@
 //! for the answer every frame.
 
 use std::sync::mpsc::{channel, Receiver, TryRecvError};
+use std::sync::Mutex;
+
+use raw_window_handle::{
+    DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawDisplayHandle,
+    RawWindowHandle, WindowHandle,
+};
+
+/// The main window, so that a dialog opens in front of it and takes focus.
+#[derive(Clone, Copy)]
+struct Parent {
+    window: RawWindowHandle,
+    display: RawDisplayHandle,
+}
+
+// The handles are only passed on to the dialog, which uses them while the
+// window is open (the app owns it for as long as it runs).
+unsafe impl Send for Parent {}
+
+impl HasWindowHandle for Parent {
+    fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
+        Ok(unsafe { WindowHandle::borrow_raw(self.window) })
+    }
+}
+
+impl HasDisplayHandle for Parent {
+    fn display_handle(&self) -> Result<DisplayHandle<'_>, HandleError> {
+        Ok(unsafe { DisplayHandle::borrow_raw(self.display) })
+    }
+}
+
+static PARENT: Mutex<Option<Parent>> = Mutex::new(None);
+
+/// Remembers the main window for the dialogs opened from now on.
+pub fn remember_window(frame: &eframe::Frame) {
+    let parent = match (frame.window_handle(), frame.display_handle()) {
+        (Ok(window), Ok(display)) => Some(Parent {
+            window: window.as_raw(),
+            display: display.as_raw(),
+        }),
+        _ => None,
+    };
+    if let Ok(mut slot) = PARENT.lock() {
+        *slot = parent;
+    }
+}
+
+/// A file dialog that opens in front of the main window.
+pub fn file_dialog() -> rfd::FileDialog {
+    let dialog = rfd::FileDialog::new();
+    match PARENT.lock().ok().and_then(|slot| *slot) {
+        Some(parent) => dialog.set_parent(&parent),
+        None => dialog,
+    }
+}
 
 /// A dialog that is open, or has just closed.
 pub struct PendingDialog<T> {

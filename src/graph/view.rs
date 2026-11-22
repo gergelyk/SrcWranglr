@@ -5,18 +5,24 @@
 //! selected function, or from the program's entry points.
 //!
 //! Controls:
-//! - click any symbol (pill or class title) to make it the active symbol
+//! - click any symbol (pill or class title) to make it the active symbol;
+//!   double-click it to make it the root of the view, framed afresh
+//! - click an entry of the legend to hide (or show again) that kind of
+//!   symbol or relation
+//! - right-click a symbol for what can be done with it
 //! - "Back" returns to the previous symbol; "Overview" clears the selection
 //! - scroll or pinch: zoom around the pointer; drag: pan
 //! - double-click the background, or "Fit": frame everything
+
+use std::collections::HashSet;
 
 use egui::{Pos2, Response, Sense, Vec2};
 
 use super::camera::Camera;
 use super::hierarchy::{all_entry_points, build_hierarchy, CallIndex};
 use super::overview::build_overview;
-use super::render::{self, font_for, Badge, Frame, Palette, LEGEND_STRIP_HEIGHT};
-use super::scene::{Scene, TextRole};
+use super::render::{self, font_for, Badge, Frame, Legend, Palette, LEGEND_STRIP_HEIGHT};
+use super::scene::{LegendItem, Scene, TextRole};
 use super::trail::build_trail;
 use crate::app::fonts::control;
 use crate::model::{CodeGraph, SymbolId};
@@ -31,6 +37,19 @@ const BUTTON_ZOOM_STEP: f32 = 1.25;
 const READABLE_ZOOM: f32 = 0.5;
 /// Back-navigation depth kept.
 const MAX_HISTORY: usize = 100;
+
+/// What the right-click menu of a symbol asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NodeAction {
+    /// Make it the root of the view.
+    Explore(SymbolId),
+    ShowDocs(SymbolId),
+    FindLike(SymbolId),
+    CrossReferences(SymbolId),
+    ToggleBookmark(SymbolId),
+    EditNote(SymbolId),
+    OpenInEditor(SymbolId),
+}
 
 enum ToolbarAction {
     Back,
@@ -88,6 +107,14 @@ pub struct GraphView {
     selected: Option<SymbolId>,
     history: Vec<SymbolId>,
     hovered: Option<SymbolId>,
+    /// Legend entries switched off.
+    hidden: HashSet<LegendItem>,
+    /// Where the legend entries were last drawn, in screen coordinates.
+    legend: Legend,
+    /// The symbol whose right-click menu is open.
+    menu_target: Option<SymbolId>,
+    /// What the menu asked for, until the app takes it.
+    pending: Option<NodeAction>,
     /// Connection count for the hovered symbol, so hovering doesn't scan
     /// every edge on every frame.
     hover_connections: Option<(SymbolId, usize)>,
@@ -108,6 +135,13 @@ impl Default for GraphView {
             selected: None,
             history: Vec::new(),
             hovered: None,
+            hidden: HashSet::new(),
+            legend: Legend {
+                items: Vec::new(),
+                height: LEGEND_STRIP_HEIGHT,
+            },
+            menu_target: None,
+            pending: None,
             hover_connections: None,
             notice: None,
         }
@@ -124,6 +158,18 @@ impl GraphView {
             mode,
             ..Self::default()
         }
+    }
+
+    /// Lays the scene out and frames it afresh, as for a new selection.
+    pub fn relayout(&mut self) {
+        self.scene = None;
+        self.is_auto_fit = true;
+        self.is_fit_all = false;
+    }
+
+    /// What the right-click menu asked for since last taken.
+    pub fn take_action(&mut self) -> Option<NodeAction> {
+        self.pending.take()
     }
 
     pub fn mode(&self) -> ViewMode {
@@ -202,12 +248,31 @@ impl GraphView {
     ) -> Response {
         let action = self.show_toolbar(ui);
         let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
-        let pointer_local = response.hover_pos().map(|p| (p - rect.min).to_pos2());
+        let over_legend = response.hover_pos().and_then(|p| self.legend_item_at(p));
+        if let Some(item) = over_legend.filter(|_| response.clicked()) {
+            self.toggle_legend(item);
+            ui.ctx().request_repaint();
+        }
+        let pointer_local = response
+            .hover_pos()
+            .filter(|_| over_legend.is_none())
+            .map(|p| (p - rect.min).to_pos2());
 
         let scene = self.take_scene(ui, graph);
-        self.handle_pointer(&response, &scene, pointer_local);
+        let before = self.selected;
+        if over_legend.is_some() {
+            self.hovered = None;
+        } else {
+            self.handle_pointer(&response, &scene, pointer_local);
+            self.show_node_menu(&response);
+        }
+        if self.selected != before {
+            // Nothing else changes on screen for a click, so no frame
+            // would follow to lay out and show the new selection.
+            ui.ctx().request_repaint();
+        }
         self.apply_toolbar_action(action, rect.size());
-        let fit_area = rect.size() - Vec2::new(0.0, LEGEND_STRIP_HEIGHT);
+        let fit_area = rect.size() - Vec2::new(0.0, self.legend.height);
         self.update_camera(&scene, fit_area);
         self.handle_scroll_zoom(ui, &response, pointer_local);
 
@@ -219,8 +284,13 @@ impl GraphView {
             hovered: self.hovered,
             palette: Palette::for_visuals(ui.visuals()),
             badge_of,
+            hidden: &self.hidden,
         };
-        render::paint(&painter, &frame);
+        let legend = render::paint(&painter, &frame);
+        if legend.height != self.legend.height {
+            ui.ctx().request_repaint();
+        }
+        self.legend = legend;
         self.notice = notice(&scene, graph, self.mode);
         self.scene = Some(((self.selected, self.mode), scene));
 
@@ -244,14 +314,36 @@ impl GraphView {
         self.is_auto_fit = true;
         self.is_fit_all = false;
         self.hover_connections = None;
-        match (self.mode, self.selected) {
+        let is_trail = self.mode == ViewMode::Trail && self.selected.is_some();
+        let mut scene = match (self.mode, self.selected) {
             (ViewMode::CallHierarchy, focus) => {
                 let calls = self.call_index.get_or_insert_with(|| CallIndex::new(graph));
                 build_hierarchy(graph, calls, focus, &measure)
             }
-            (ViewMode::Trail, Some(id)) => build_trail(graph, id, &measure),
+            (ViewMode::Trail, Some(id)) => build_trail(graph, id, &self.hidden, &measure),
             (ViewMode::Trail, None) => build_overview(graph, &measure),
+        };
+        // The trail already leaves out what is switched off.
+        if !is_trail {
+            leave_out(&mut scene, &self.hidden);
         }
+        scene
+    }
+
+    fn legend_item_at(&self, pos: Pos2) -> Option<LegendItem> {
+        self.legend
+            .items
+            .iter()
+            .find(|(_, rect)| rect.contains(pos))
+            .map(|(item, _)| *item)
+    }
+
+    /// Hides `item`'s symbols or relations, or shows them again.
+    fn toggle_legend(&mut self, item: LegendItem) {
+        if !self.hidden.remove(&item) {
+            self.hidden.insert(item);
+        }
+        self.scene = None;
     }
 
     fn show_toolbar(&mut self, ui: &mut egui::Ui) -> Option<ToolbarAction> {
@@ -324,12 +416,49 @@ impl GraphView {
             self.camera = self.camera.panned(response.drag_delta());
             self.is_auto_fit = false;
         }
-        if response.double_clicked() && self.hovered.is_none() {
-            self.fit();
+        if response.double_clicked() {
+            match self.hovered {
+                // The first click selected it; the app navigates to it.
+                Some(id) => self.pending = Some(NodeAction::Explore(id)),
+                None => self.fit(),
+            }
         } else if response.clicked() {
             if let Some(id) = self.hovered {
                 self.select(id);
             }
+        }
+    }
+
+    fn show_node_menu(&mut self, response: &Response) {
+        if response.secondary_clicked() {
+            self.menu_target = self.hovered;
+            if let Some(id) = self.menu_target {
+                self.select(id);
+            }
+        }
+        let Some(id) = self.menu_target else {
+            return;
+        };
+        let mut chosen = None;
+        let items: [(&str, fn(SymbolId) -> NodeAction); 7] = [
+            ("Explore from Here", NodeAction::Explore),
+            ("Show Docs", NodeAction::ShowDocs),
+            ("Find Code Like This", NodeAction::FindLike),
+            ("Cross References", NodeAction::CrossReferences),
+            ("Toggle Bookmark", NodeAction::ToggleBookmark),
+            ("Note…", NodeAction::EditNote),
+            ("Open in Editor", NodeAction::OpenInEditor),
+        ];
+        response.clone().context_menu(|ui| {
+            for (label, action) in items {
+                if ui.button(label).clicked() {
+                    chosen = Some(action(id));
+                    ui.close();
+                }
+            }
+        });
+        if chosen.is_some() {
+            self.pending = chosen;
         }
     }
 
@@ -422,6 +551,87 @@ fn hierarchy_notice(scene: &Scene) -> Option<String> {
         (Some(_), false) => (!hidden.is_empty()).then(|| format!("Calls made from here{hidden}")),
         (None, false) => Some(format!("Calls from the program's entry points{hidden}")),
     }
+}
+
+/// Takes what the legend has switched off out of `scene`, and what is then
+/// no longer connected to the active symbol. The active symbol stays,
+/// whatever its kind.
+fn leave_out(scene: &mut Scene, hidden: &HashSet<LegendItem>) {
+    if hidden.is_empty() {
+        return;
+    }
+    let active = scene.active;
+    let is_off = |kind| hidden.contains(&LegendItem::of_symbol(kind));
+    scene
+        .pills
+        .retain(|p| Some(p.id) == active || !is_off(p.kind));
+    scene
+        .groups
+        .retain(|g| (g.id.is_some() && g.id == active) || !g.kind.is_some_and(is_off));
+    for group in &mut scene.groups {
+        group
+            .pills
+            .retain(|p| Some(p.id) == active || !is_off(p.kind));
+    }
+    let drawable = |scene: &Scene, w: &super::scene::Wire| {
+        !hidden.contains(&LegendItem::Relation(w.kind))
+            && scene.anchor(w.from).is_some()
+            && scene.anchor(w.to).is_some()
+    };
+    let wires = std::mem::take(&mut scene.wires);
+    scene.wires = wires.into_iter().filter(|w| drawable(scene, w)).collect();
+    let secondary = std::mem::take(&mut scene.secondary_wires);
+    scene.secondary_wires = secondary
+        .into_iter()
+        .filter(|w| drawable(scene, w))
+        .collect();
+    if let Some(active) = active {
+        drop_unconnected(scene, active);
+    }
+}
+
+/// Drops what has no chain of wires to `active`. A group's pills count as
+/// the group.
+fn drop_unconnected(scene: &mut Scene, active: SymbolId) {
+    let unit = |scene: &Scene, id: SymbolId| -> Vec<SymbolId> {
+        let group = scene
+            .groups
+            .iter()
+            .find(|g| g.id == Some(id) || g.pills.iter().any(|p| p.id == id));
+        match group {
+            Some(g) => {
+                g.id.into_iter()
+                    .chain(g.pills.iter().map(|p| p.id))
+                    .collect()
+            }
+            None => vec![id],
+        }
+    };
+    let mut reached: HashSet<SymbolId> = unit(scene, active).into_iter().collect();
+    loop {
+        let before = reached.len();
+        for wire in &scene.wires {
+            for (near, far) in [(wire.from, wire.to), (wire.to, wire.from)] {
+                if reached.contains(&near) {
+                    reached.extend(unit(scene, far));
+                }
+            }
+        }
+        if reached.len() == before {
+            break;
+        }
+    }
+    scene.pills.retain(|p| reached.contains(&p.id));
+    scene.groups.retain(|g| {
+        g.id.is_some_and(|id| reached.contains(&id))
+            || g.pills.iter().any(|p| reached.contains(&p.id))
+    });
+    scene
+        .wires
+        .retain(|w| reached.contains(&w.from) && reached.contains(&w.to));
+    scene
+        .secondary_wires
+        .retain(|w| reached.contains(&w.from) && reached.contains(&w.to));
 }
 
 /// Index of the item after `current` in `list`, wrapping; the first item

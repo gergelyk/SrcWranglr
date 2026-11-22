@@ -443,7 +443,7 @@ impl SettingsView {
 
     fn pick_folder(&mut self, ctx: &egui::Context) {
         let dialog = dialogs::spawn(ctx, || {
-            rfd::FileDialog::new()
+            dialogs::file_dialog()
                 .set_title("A folder to look for tools in")
                 .pick_folder()
         });

@@ -198,17 +198,11 @@ impl CodePanel {
             // A name explored is highlighted wherever it is written, too.
             self.highlighted_word = name_at(graph, &file, clicked.span);
         }
-        self.event_action(file, event, symbol.id)
+        self.event_action(file, event)
     }
-
-    /// What a click or menu pick in the code asks for; clicking another
+    /// What a click or menu pick in the code asks for.
     /// occurrence of `selected` moves to it instead.
-    fn event_action(
-        &mut self,
-        file: String,
-        event: CodeEvent,
-        selected: SymbolId,
-    ) -> Option<PanelAction> {
+    fn event_action(&mut self, file: String, event: CodeEvent) -> Option<PanelAction> {
         match event {
             CodeEvent::Line(line, LineAction::Trace(column)) => {
                 Some(PanelAction::Trace { file, line, column })
@@ -280,20 +274,15 @@ impl CodePanel {
                 })
             }
             CodeEvent::Risk(id) => Some(PanelAction::ShowFinding(id)),
-            CodeEvent::Clicked(clicked) if clicked.symbol != selected => {
-                Some(PanelAction::Explore(clicked.symbol))
-            }
-            CodeEvent::Clicked(clicked) => {
-                // Another occurrence of the selected symbol: make it the
-                // current location.
-                self.cursor = self
-                    .cursor
-                    .take()
-                    .map(|c| c.focused_on(&file, clicked.span));
-                self.reveal = None;
-                None
-            }
+            CodeEvent::Clicked(clicked) => Some(PanelAction::Explore(clicked.symbol)),
         }
+    }
+
+    /// Back to the symbol's definition, scrolled to, as when first selected.
+    pub fn restart(&mut self) {
+        self.cursor = None;
+        self.reveal = None;
+        self.should_scroll = true;
     }
 
     /// Shows `file:line` for `symbol` (which the caller selects) instead of

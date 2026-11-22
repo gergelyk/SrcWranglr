@@ -19,6 +19,7 @@ const TOGGLE_ROUNDING: u8 = 12;
 /// A pane that can be shown or hidden.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pane {
+    Files,
     Symbols,
     Source,
     Notes,
@@ -33,7 +34,8 @@ pub enum Pane {
 
 impl Pane {
     /// In the order the toggles are shown, left to right.
-    pub const ALL: [Pane; 10] = [
+    pub const ALL: [Pane; 11] = [
+        Pane::Files,
         Pane::Symbols,
         Pane::Source,
         Pane::Notes,
@@ -49,6 +51,7 @@ impl Pane {
     /// Its toggle's label.
     pub fn label(self) -> &'static str {
         match self {
+            Pane::Files => "Files",
             Pane::Symbols => "Symbols",
             Pane::Source => "Source",
             Pane::Notes => "Notes",
@@ -65,6 +68,7 @@ impl Pane {
     /// What it shows, for menus, the palette and tooltips.
     pub fn title(self) -> &'static str {
         match self {
+            Pane::Files => "File Explorer",
             Pane::Symbols => "Symbol List",
             Pane::Source => "Source Pane",
             Pane::Notes => "Notes, Bookmarks & Journal",
@@ -166,6 +170,7 @@ fn toggle(ui: &mut egui::Ui, font: BarFont, pane: Pane, is_lit: bool) -> egui::R
 impl SrcWranglrApp {
     pub(super) fn is_pane_shown(&self, pane: Pane) -> bool {
         match pane {
+            Pane::Files => self.layout.is_files_shown,
             Pane::Symbols => self.layout.is_symbols_shown,
             Pane::Source => self.layout.is_source_shown,
             Pane::Notes => self.notes_panel.is_open(),
@@ -183,6 +188,7 @@ impl SrcWranglrApp {
     pub(super) fn toggle_pane(&mut self, pane: Pane) {
         let is_shown = !self.is_pane_shown(pane);
         match pane {
+            Pane::Files => self.layout = self.layout.with_files_shown(is_shown),
             Pane::Symbols => self.layout = self.layout.with_symbols_shown(is_shown),
             Pane::Source => self.layout = self.layout.with_source_shown(is_shown),
             Pane::Notes => self.notes_panel.set_open(is_shown),
@@ -290,13 +296,13 @@ mod tests {
     }
 
     #[test]
-    fn the_symbol_list_and_source_start_shown_and_the_rest_hidden() {
+    fn the_files_symbol_list_and_source_start_shown_and_the_rest_hidden() {
         let (app, _) = demo_app();
         let shown: Vec<Pane> = Pane::ALL
             .into_iter()
             .filter(|&pane| app.is_pane_shown(pane))
             .collect();
-        assert_eq!(shown, [Pane::Symbols, Pane::Source]);
+        assert_eq!(shown, [Pane::Files, Pane::Symbols, Pane::Source]);
     }
 
     #[test]

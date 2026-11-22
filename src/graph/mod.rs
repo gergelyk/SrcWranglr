@@ -9,5 +9,5 @@ mod scene;
 mod trail;
 mod view;
 
-pub use render::Badge;
-pub use view::{GraphView, ViewMode};
+pub use render::{kind_color, Badge};
+pub use view::{GraphView, NodeAction, ViewMode};

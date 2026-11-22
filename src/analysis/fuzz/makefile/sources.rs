@@ -92,7 +92,10 @@ impl<'a> Index<'a> {
         }
         let mut next: HashMap<SymbolId, Vec<SymbolId>> = HashMap::new();
         for edge in &graph.edges {
-            if matches!(edge.kind, EdgeKind::Calls | EdgeKind::Uses) {
+            if matches!(
+                edge.kind,
+                EdgeKind::Calls | EdgeKind::Uses | EdgeKind::Aggregates | EdgeKind::Composes
+            ) {
                 next.entry(edge.from).or_default().push(edge.to);
             }
         }
