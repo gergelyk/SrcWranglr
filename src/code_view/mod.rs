@@ -7,6 +7,7 @@
 
 pub mod changes;
 mod line_menu;
+mod minimap;
 pub mod scheme;
 mod segments;
 mod tokenize;
@@ -23,7 +24,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use egui::text::{CCursor, Galley, LayoutJob, TextFormat};
-use egui::{Color32, CursorIcon, Response, RichText, Sense, Stroke};
+use egui::{Color32, CursorIcon, Pos2, Rect, Response, RichText, Sense, Stroke};
 
 use crate::model::{CodeGraph, EdgeKind, Occurrence, OccurrenceRole, Span, SymbolId};
 use crate::style::{BOOKMARK_COLOR, MARK_OUTLINE, NOTE_COLOR, TRAIL_COLOR};
@@ -205,6 +206,10 @@ pub enum CodeEvent {
 pub struct CodeView {
     cached_file: Option<String>,
     lines: Vec<Range<usize>>,
+    /// The lines boiled down for the minimap.
+    summary: Vec<minimap::Line>,
+    /// Where the code was scrolled to last frame.
+    scroll: minimap::Metrics,
     /// Rows drawn last frame (0-based), for the cached file.
     visible_rows: Range<usize>,
     /// The doc brief of the symbol last hovered, in the graph at that
@@ -237,6 +242,8 @@ impl CodeView {
         };
         if self.cached_file.as_deref() != Some(focus.file) {
             self.lines = line_ranges(contents);
+            self.summary = minimap::summarize(contents, &self.lines);
+            self.scroll = minimap::Metrics::default();
             self.cached_file = Some(focus.file.to_string());
             self.visible_rows = 0..0;
         }
@@ -259,23 +266,49 @@ impl CodeView {
             area = area.vertical_scroll_offset(target.max(0.0));
         }
 
+        let full = ui.available_rect_before_wrap();
+        let width = minimap::MINIMAP_WIDTH.min(full.width() / 3.0);
+        let map_rect = Rect::from_min_max(Pos2::new(full.right() - width, full.top()), full.max);
+        let code_rect = Rect::from_min_max(full.min, Pos2::new(map_rect.left(), full.bottom()));
+        let focus_row = usize::try_from(focus.line.saturating_sub(1)).unwrap_or(usize::MAX);
+        if let Some(offset) = minimap::show(
+            ui,
+            map_rect,
+            &self.summary,
+            &focus.colors,
+            self.scroll,
+            focus_row,
+        ) {
+            area = area.vertical_scroll_offset(offset);
+        }
+
         let lines = &self.lines;
-        let (clicked, visible_rows) = egui::Frame::NONE
-            .fill(focus.colors.background)
-            .show(ui, |ui| {
-                area.show_rows(ui, rows.row_height, lines.len(), |ui, visible| {
-                    // Rows must be exactly `row_height` tall, or the
-                    // virtualization and scroll-to-line math drift.
-                    ui.spacing_mut().interact_size.y = rows.row_height;
-                    let clicked = visible
-                        .clone()
-                        .filter_map(|idx| rows.show_line(ui, idx, lines.get(idx)?.clone()))
-                        .last();
-                    (clicked, visible)
-                })
-                .inner
+        let output = ui
+            .scope_builder(egui::UiBuilder::new().max_rect(code_rect), |ui| {
+                egui::Frame::NONE
+                    .fill(focus.colors.background)
+                    .show(ui, |ui| {
+                        area.show_rows(ui, rows.row_height, lines.len(), |ui, visible| {
+                            // Rows must be exactly `row_height` tall, or the
+                            // virtualization and scroll-to-line math drift.
+                            ui.spacing_mut().interact_size.y = rows.row_height;
+                            let clicked = visible
+                                .clone()
+                                .filter_map(|idx| rows.show_line(ui, idx, lines.get(idx)?.clone()))
+                                .last();
+                            (clicked, visible)
+                        })
+                    })
+                    .inner
             })
             .inner;
+        ui.advance_cursor_after_rect(full);
+        self.scroll = minimap::Metrics {
+            offset: output.state.clamped_offset().y,
+            content: output.content_size.y,
+            view: output.inner_rect.height(),
+        };
+        let (clicked, visible_rows) = output.inner;
         self.visible_rows = visible_rows;
         clicked
     }
